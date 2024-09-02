@@ -5,6 +5,9 @@ import fs from "fs";
 import path from 'path';
 import {v4 as uuidv4 } from "uuid";
 import { contentType } from 'mime-types';
+import Bull from "bull";
+
+const fileQueue = new Bull('fileQueue', {redis: {port: 6379, host: 'localhost'}});
 class FilesController {
     static async postUpload(req, res) {
         const token = req.headers['x-token'] || req.headers['X-Token'];
@@ -37,7 +40,7 @@ class FilesController {
             }
         }
         const fileDocument = {
-            userId,
+            userId: new mongodb.ObjectId(userId),
             name,
             type,
             isPublic,
@@ -57,6 +60,10 @@ class FilesController {
         fs.writeFileSync(localPath, Buffer.from(data, 'base64'));
         fileDocument.localPath = localPath;
         await dbClient.filesCollection().insertOne(fileDocument);
+        if (type === 'image') {
+            await fileQueue.add({fileId: fileDocument._id.toString(),
+            userId: new mongodb.ObjectId(userId._id).toString()});
+        }
         const id = fileDocument._id
         delete fileDocument._id
         res.status(201).json({
@@ -171,12 +178,22 @@ class FilesController {
         if (file.type === 'folder') {
             return res.status(400).json({ error: "A folder doesn't have content" });
         }
+        const size = req.query.size;
+        if (file.type === 'image' && size && ['500', '250', '100'].includes(size)) {
+            const thumbnailPath = `${file.localPath}_${size}.jpg`;
+            if (fs.existsSync(thumbnailPath)) {
+                res.setHeader('Content-Type', contentType(file.name));
+                res.sendFile(path.resolve(thumbnailPath));
+            }
+            return res.status(404).json({ error: 'Not found' });
+        }
 
         if (!fs.existsSync(file.localPath)) {
             return res.status(404).json({ error: 'Not found' });
         }
         res.setHeader('Content-Type', contentType(file.name));
         res.sendFile(path.resolve(file.localPath));
+
     }
 }
 
